@@ -2,7 +2,7 @@
 
 **A pattern for giving Claude Code persistent, version-controlled, self-auditing project memory using an append-only SQLite database.**
 
-> This pattern was developed across 115+ sessions on a commercial SaaS project (Agent Red Customer Experience). It evolved from markdown-only memory into a structured database with 8 managed artifact types after discovering that markdown backlogs drift, context windows forget, and session boundaries lose state. The approach below is extractable to any project.
+> This pattern was developed across 125+ sessions on a commercial SaaS project (Agent Red Customer Experience). It evolved from markdown-only memory into a structured database with 8 managed artifact types after discovering that markdown backlogs drift, context windows forget, and session boundaries lose state. The approach below is extractable to any project.
 
 ---
 
@@ -29,11 +29,12 @@ project/
     knowledge.db               # The database (auto-created)
     seed.py                    # Initial data loader
     assertions.py              # Machine-verifiable checks (~280 lines)
-    app.py                     # Read-only web UI (~230 lines)
+    app.py                     # Read-only web UI (~260 lines)
   .claude/
     hooks/
       assertion-check.py       # SessionStart hook: run assertions + inject handoff
       scheduler.py             # UserPromptSubmit hook: process scheduled prompts
+      spec-classifier.py       # UserPromptSubmit hook: detect specification language (GOV-09)
     settings.local.json        # Hook registration
     SCHEDULE.md                # Pre-planned prompts (FIFO queue)
 ```
@@ -111,7 +112,7 @@ INNER JOIN (
 | Type | Purpose |
 |------|---------|
 | `requirement` | Business requirement — "would a different choice affect the customer or the business?" |
-| `governance` | Process rules — GOV-01 through GOV-08 (how the human-AI team works) |
+| `governance` | Process rules — GOV-01 through GOV-11 (how the human-AI team works) |
 | `protected_behavior` | Machine-verifiable assertions that must always pass |
 
 #### Tests Table (Spec-Linked)
@@ -401,7 +402,7 @@ Without assertions, Claude "believes" specs are implemented based on session mem
 
 ## Step 3: Governance Principles
 
-These governance principles evolved over 115+ sessions. They are not mandatory — adopt the ones that fit your project.
+These governance principles evolved over 125+ sessions. They are not mandatory — adopt the ones that fit your project.
 
 ### GOV-01: Specs Are the Negotiation Artifact
 
@@ -434,6 +435,18 @@ Record defects as work items during test phases; fix them in separate sessions. 
 ### GOV-08: Knowledge Database Is the Single Source of Truth
 
 All project knowledge lives in the KB. Markdown files store rules (CLAUDE.md) and operational state (MEMORY.md), but specifications, tests, procedures, and documents belong in the database.
+
+### GOV-09: Owner Input Classification
+
+When the owner describes what the system "must do," "should do," "must include," or states numbered criteria, classify the input as specification language. Before writing any code: (1) record or verify specifications in KB, (2) identify work items for any gaps, (3) add work items to the backlog, (4) present the backlog for prioritization. A `UserPromptSubmit` hook (`spec-classifier.py`) mechanically enforces this, but Claude must also self-enforce when the hook does not trigger.
+
+### GOV-10: Tests Must Exercise Exposed Production Interfaces
+
+Source inspection tests (reading code files to verify patterns) are regression supplements, not Test artifacts. Each Test artifact must produce PASS/FAIL against observable outcomes on live/staging systems. Tests are written and linked to specs before implementation.
+
+### GOV-11: Design Decision Checkpoint Discipline
+
+At each work item or phase completion boundary, Claude must review implementation decisions for spec coverage before proceeding. Batched checkpoint (at boundary), not real-time pause. This catches implementation decisions that should have been specifications but were not recorded in real time.
 
 ### The Specification Litmus Test
 
@@ -485,6 +498,10 @@ for failure in failures:
         # Expected -- not yet implemented
         expected.append(failure)
 ```
+
+### UserPromptSubmit Hook — Specification Classifier (GOV-09)
+
+The spec-classifier hook (`.claude/hooks/spec-classifier.py`) scans each user prompt for specification language — phrases like "must include," "should do," "ensure that," or numbered criteria. When detected, it injects a reminder to follow the spec-first workflow (GOV-09) before writing any code. This prevents Claude from jumping straight to implementation when the owner is actually defining requirements.
 
 ### UserPromptSubmit Hook — Session Scheduler
 
@@ -591,7 +608,7 @@ Python API: `tools/knowledge-db/db.py`
 A simple Flask app provides the owner with visibility without giving them write access:
 
 ```python
-# app.py -- ~230 lines, runs at localhost:8090
+# app.py -- ~260 lines, runs at localhost:8090
 from flask import Flask, render_template_string
 from db import KnowledgeDB
 
@@ -674,7 +691,7 @@ before new work.
 
 ---
 
-## Lessons Learned (115+ Sessions)
+## Lessons Learned (125+ Sessions)
 
 1. **The assertion runner is the single most valuable piece.** It turns "Claude remembers" into "Claude proves." Regressions caught at session start save hours of debugging.
 
@@ -698,13 +715,19 @@ before new work.
 
 11. **Python method name shadowing is silent.** When a class defines two methods with the same name, the second silently replaces the first. No error raised. Always use unique helper names per table (e.g., `_next_test_proc_version` vs `_next_test_version`).
 
-12. **Governance principles emerge from use.** Do not try to design all the rules upfront. Let them crystallize through real sessions. Our 8 governance principles were all discovered through actual failures, not anticipated.
+12. **Governance principles emerge from use.** Do not try to design all the rules upfront. Let them crystallize through real sessions. Our 11 governance principles were all discovered through actual failures, not anticipated.
 
 13. **The orchestrating artifact principle prevents content duplication.** Test plans reference test IDs, backlogs reference work item IDs. Never duplicate artifact content inside another artifact — reference by ID and keep each artifact independently versioned.
 
 14. **Specification types enable different behaviors.** Requirements, governance rules, and protected behaviors have different change frequencies and verification patterns. A `type` column lets you filter and handle them differently.
 
 15. **Migrate topic files to the database.** Markdown topic files inevitably drift from reality. Migrating project knowledge into documents under change control catches contradictions and enables search across all knowledge.
+
+16. **Mechanical specification enforcement beats self-enforcement.** A UserPromptSubmit hook that detects specification language ("must include," "should do") and injects a GOV-09 reminder catches cases where Claude would otherwise jump straight to coding. The hook cost zero maintenance after initial creation and has prevented several spec-first violations.
+
+17. **Source inspection tests are not real tests.** Reading TypeScript source files with `Path.read_text()` and checking for string patterns is useful as a regression supplement but does not exercise the production interface. Distinguishing these from genuine Test artifacts (GOV-10) improved test plan credibility.
+
+18. **Design decisions accumulate silently.** During implementation, Claude makes dozens of decisions per session (billing model, auth strategy, bypass logic) that affect customers but are never recorded as specifications. A batched checkpoint at work item boundaries (GOV-11) catches these before they become invisible commitments.
 
 ---
 
@@ -721,10 +744,11 @@ before new work.
 - [ ] Run `python tools/knowledge-db/seed.py` to populate initial data
 - [ ] Verify assertions run at session start
 - [ ] Optionally create `.claude/hooks/scheduler.py` + `.claude/SCHEDULE.md` (session scheduler)
+- [ ] Optionally create `.claude/hooks/spec-classifier.py` (detect specification language in user prompts)
 - [ ] Add extended tables (tests, test_plans, work_items, documents) when your project grows
 
 ---
 
-*This pattern was developed on the Agent Red Customer Experience project by Remaker Digital. The implementation approach is freely reusable under the MIT license. Adapt the schema to your project's needs — the core principles (append-only, machine-verifiable assertions, governance discipline, session handoff, audit cadence) are universal.*
+*This pattern was developed across 125+ sessions on the Agent Red Customer Experience project by Remaker Digital. The implementation approach is freely reusable under the MIT license. Adapt the schema to your project's needs — the core principles (append-only, machine-verifiable assertions, governance discipline, session handoff, audit cadence) are universal.*
 
 *© 2026 Remaker Digital, a DBA of VanDusen & Palmeter, LLC. All rights reserved.*

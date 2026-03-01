@@ -12,7 +12,7 @@
 
 Membase is a **pattern** (not a library) for giving Claude Code durable memory that survives across sessions. It replaces fragile markdown backlogs with a structured, append-only SQLite database where every change is versioned and every claim is machine-verifiable.
 
-Developed across 115+ sessions on a commercial SaaS project, it solves three problems that emerge in long-running Claude Code projects:
+Developed across 125+ sessions on a commercial SaaS project, it solves three problems that emerge in long-running Claude Code projects:
 
 1. **Context window saturation** — long sessions accumulate stale context that biases decisions.
 2. **Session boundary amnesia** — each new session starts cold; CLAUDE.md and MEMORY.md help but drift over time.
@@ -57,9 +57,10 @@ That's it. The file contains the complete implementation pattern — schema, API
 - **8 managed artifact types** — Specifications, tests, test plans, work items, backlog snapshots, operational procedures, documents, and environment config. Each is versioned, queryable, and under change control.
 - **Append-only** — No rows are ever updated or deleted. Every change creates a new versioned record. Current state = latest version per ID. Full audit trail, no accidental data loss.
 - **Machine-verifiable assertions** — Each specification can have grep/glob assertions that Claude runs automatically at session start. Turns "Claude remembers" into "Claude proves."
-- **Governance principles** — Specifications are the negotiation artifact between human and AI. They function as a decision log (what was agreed and why), not a build specification (how to construct).
+- **Governance principles** — 11 governance principles (GOV-01 through GOV-11) evolved through real project use. Specifications are the negotiation artifact between human and AI. They function as a decision log (what was agreed and why), not a build specification (how to construct).
 - **Orchestrating artifacts** — Test plans and backlogs reference other artifacts by ID without duplicating content. Each referenced artifact is independently managed and versioned.
 - **Session handoff** — The previous session stores a structured prompt for the next one, so Claude automatically knows what to work on.
+- **Owner input classification** — A hook detects specification language ("must do," "should include") in user prompts and enforces the spec-first workflow before any implementation begins.
 - **Audit cadence** — Every Nth session (default: 5) is flagged for a fresh-context integrity review, catching drift that accumulates across sessions.
 - **Never-delete retention** — At ~20 KB/session with a 400 GB budget, the database can run indefinitely (~57,000 years at 1 session/day). Storage is not a constraint.
 
@@ -82,7 +83,7 @@ This pattern was developed incrementally on the [Agent Red Customer Experience](
 
 The database is used exclusively by Claude and contains only what Claude needs to remember. The human observes through a lightweight read-only UI (sort, filter, search, tree-view, change history) that deliberately excludes write operations. When the human spots a discrepancy, they tell Claude, and Claude creates a corrected version.
 
-The current database is ~7 MB with 1,670 specifications, 1,868 test artifacts, 1 test plan (16 phases), 11 operational procedures, 134 documents, 27 environment config entries, 70 machine-verifiable assertions (all passing), and nearly 2,000 test-to-spec coverage mappings — all accumulated across 115+ sessions with zero data loss.
+The current database is ~13 MB with 1,767 specifications, 2,725 test artifacts, 1 test plan (16 phases), 881 work items, 13 operational procedures, 138 documents, 27 environment config entries, 165 machine-verifiable assertions (117 machine-checkable, all passing), and nearly 2,000 test-to-spec coverage mappings — all accumulated across 125+ sessions with zero data loss.
 
 ---
 

@@ -2,7 +2,7 @@
 
 **A pattern for giving Claude Code persistent, version-controlled, self-auditing project memory using an append-only SQLite database.**
 
-> This pattern was developed across 128 sessions on a commercial SaaS project (Agent Red Customer Experience). It evolved from markdown-only memory into a structured database with 8 managed artifact types after discovering that markdown backlogs drift, context windows forget, and session boundaries lose state. The approach below is extractable to any project.
+> This pattern was developed across 133 sessions on a commercial SaaS project (Agent Red Customer Experience). It evolved from markdown-only memory into a structured database with 8 managed artifact types after discovering that markdown backlogs drift, context windows forget, and session boundaries lose state. The approach below is extractable to any project.
 
 ---
 
@@ -111,7 +111,7 @@ INNER JOIN (
 | Type | Purpose |
 |------|---------|
 | `requirement` | Business requirement — "would a different choice affect the customer or the business?" |
-| `governance` | Process rules — GOV-01 through GOV-12 (how the human-AI team works) |
+| `governance` | Process rules — GOV-01 through GOV-17 (how the human-AI team works) |
 | `protected_behavior` | Machine-verifiable assertions that must always pass |
 
 #### Tests Table (Spec-Linked)
@@ -402,7 +402,7 @@ Without assertions, Claude "believes" specs are implemented based on session mem
 
 ## Step 3: Governance Principles
 
-These governance principles evolved over 128 sessions. They are not mandatory — adopt the ones that fit your project.
+These governance principles evolved over 133 sessions. They are not mandatory — adopt the ones that fit your project.
 
 ### GOV-01: Specs Are the Negotiation Artifact
 
@@ -451,6 +451,26 @@ At each work item or phase completion boundary, Claude must review implementatio
 ### GOV-12: Work Item Creation Triggers Test Creation
 
 Creating a work item initiates test creation; the backlog initiates implementation. This ensures no work proceeds without a testable definition of "done." Tests may be logical assertions, user story descriptions, or abstract descriptions.
+
+### GOV-13: Phase Assignment at Creation
+
+Every Test artifact must be assigned to at least one test plan phase upon creation. No orphan tests — if a test exists, it belongs to a phase. This prevents accumulating tests that are never executed.
+
+### GOV-14: UI Test Sync
+
+When a UI element changes (label, layout, component), the corresponding E2E tests must be updated in the same work item. UI changes without matching test updates create silent drift.
+
+### GOV-15: Test Fix Approval Gate
+
+No fixing failed tests without explicit owner approval. Failed tests may indicate either a test bug or a product bug — the owner decides which. Claude must report diagnostics and the proposed fix, then wait for approval. Enforced via `owner_approved=True` parameter in the KB `update_work_item()` method.
+
+### GOV-16: Deployment Approval Gate
+
+No deployment to any environment without explicit owner approval. Claude prepares the build and presents the deployment plan; the owner approves. This prevents accidental production deployments.
+
+### GOV-17: Quality First
+
+Prioritize quality (correctness, completeness, absence of defects) over effort or speed. Software engineering excellence is the primary objective.
 
 ### The Specification Litmus Test
 
@@ -691,7 +711,7 @@ before new work.
 
 ---
 
-## Lessons Learned (128 Sessions)
+## Lessons Learned (133 Sessions)
 
 1. **The assertion runner is the single most valuable piece.** It turns "Claude remembers" into "Claude proves." Regressions caught at session start save hours of debugging.
 
@@ -733,6 +753,16 @@ before new work.
 
 20. **The glossary is the pattern, not the code.** The most important thing Membase establishes is shared vocabulary. When the human says "backlog" and Claude says "backlog," both must refer to the same real, versioned, queryable artifact. Without this agreement, every other benefit (assertions, versioning, governance) is undermined.
 
+21. **Live-only testing catches what mocks miss.** Source inspection tests (reading TypeScript files, checking string literals) and mocked API tests pass locally but miss integration failures. Converting to live external interface tests (HTTP calls to staging, Playwright against real UI) exposed real bugs that mock-based tests hid. The tradeoff: live tests are slower and environment-dependent, but their signal is trustworthy.
+
+22. **Phase restoration preserves taxonomy.** When restructuring a test plan, restore phase numbers with new implementations rather than creating new phases or scattering tests. This preserves the plan's taxonomy, maps to existing KB records, and produces clear pipeline output. Remove phases only when the entire category is genuinely obsolete.
+
+23. **Owner approval gates prevent autonomous damage.** GOV-15 (test fix approval) and GOV-16 (deployment approval) emerged from incidents where Claude "fixed" a failing test by relaxing expectations (hiding a real bug) or deployed without confirmation. The `owner_approved=True` parameter on `update_work_item()` makes the approval gate machine-enforced, not honor-system.
+
+24. **Backlog snapshots are workflow gates.** The KB enforces `created → tested → backlogged → implementing → resolved` transitions. Advancing to `implementing` requires the work item to exist in a backlog snapshot. This prevents bypassing prioritization — you cannot implement work that was never formally planned.
+
+25. **Governance principles compound and accelerate.** GOV-01 through GOV-17 were discovered over 133 sessions. Early principles (GOV-01–06) took many sessions to crystallize. Later ones (GOV-13–17) emerged within a few sessions because the pattern was established. Expect governance discovery to accelerate as the system matures.
+
 ---
 
 ## Glossary
@@ -766,7 +796,7 @@ These terms have specific meanings in the Membase pattern. Each corresponds to a
 | **Assertion** | A machine-verifiable check attached to a specification. Three types: `grep` (pattern must exist in file), `grep_absent` (pattern must NOT exist in file), `glob` (file path must exist). Stored as JSON in the specification's `assertions` column. Runs automatically at session start via the SessionStart hook. |
 | **Phantom Artifact** | A concept referenced as if it were a tracked entity, but with no backing storage, change control, or queryable history. Example: saying "the backlog contains WI-42" when no backlog table exists. The anti-pattern this entire system was designed to eliminate. |
 | **Orchestrating Artifact** | An artifact that composes other artifacts by reference (ID only), never by content duplication. Test plans reference test IDs; backlog snapshots reference work item IDs. Each referenced artifact is independently managed and versioned. Prevents content duplication and the drift that accompanies it. |
-| **Governance Principle** | A process rule (GOV-\*) governing how the human-AI team works together. Discovered through real project failures, not designed upfront. Currently 14 principles: 12 numbered rules (GOV-01 through GOV-12) plus 2 architectural principles (SPEC-1493: Artifact Inventory, SPEC-1499: Orchestrating Artifact). |
+| **Governance Principle** | A process rule (GOV-\*) governing how the human-AI team works together. Discovered through real project failures, not designed upfront. Currently 19 principles: 17 numbered rules (GOV-01 through GOV-17) plus 2 architectural principles (SPEC-1493: Artifact Inventory, SPEC-1499: Orchestrating Artifact). |
 | **Protected Behavior** | A specification with `type = 'protected_behavior'` carrying machine-verifiable assertions that must always pass. Checked in build gates before every deployment. |
 | **Append-Only Change Control** | The versioning discipline: no UPDATE in place, no DELETE. Every mutation creates a new versioned row with mandatory `changed_by`, `changed_at`, and `change_reason`. Current state = latest version per ID (via SQL views). Full audit trail preserved indefinitely. |
 | **Session Handoff** | The mechanism by which one session stores context for the next. The previous session calls `db.insert_session_prompt()` with a structured prompt; the SessionStart hook retrieves and displays it, then marks it consumed. Eliminates the human needing to craft "Continue work on X..." prompts. |
@@ -792,30 +822,37 @@ Membase was not designed upfront — it evolved through real project needs. Each
 | S113–S114 | "Backlog" and "test plan" referenced but not actually tracked | **Artifact System Redesign** — 5 new tables, phantom artifacts eliminated, orchestrating artifact principle |
 | S116–S117 | Claude implements before recording specs from owner requirements | **GOV-09 + GOV-10** — spec-language detection hook (S116), tests must exercise production interfaces (S117) |
 | S128 | Work items created without tests; no lifecycle tracking | **GOV-12** — work item creation triggers test creation; `stage` column with transition enforcement |
+| S129 | Tests orphaned from test plan phases | **GOV-13** — test artifacts must be assigned to at least one test plan phase upon creation |
+| S131 | UI changes break tests silently; tests fixed without approval; deploys without approval | **GOV-14–16** — UI element test sync, test fix approval gate, deployment approval gate |
+| S131 | Manual multi-step deployment process is error-prone | **Automated deploy pipeline** — single-invocation 15-phase staging / 12-phase production pipeline |
+| S133 | Mocked/inspection tests give false confidence; can't verify production behavior | **SPEC-1649** — Master Test Plan converted to live-only external interfaces (13 active phases, 3 removed) |
 
-### Current State (Session 128)
+### Current State (Session 133)
 
 | Category | Metric | Count |
 |----------|--------|-------|
-| **Specifications** | Total | 1,803 |
-| | Verified | 309 |
-| | Implemented | 795 |
-| | Specified (not yet implemented) | 695 |
-| **Tests** | Test artifacts (spec-linked) | 2,797 |
+| **Specifications** | Total | 1,857 |
+| | Verified | 314 |
+| | Implemented | 805 |
+| | Specified (not yet implemented) | 734 |
+| | Governance (GOV-01 through GOV-17) | 19 |
+| **Tests** | Test artifacts (spec-linked) | 3,016 |
+| | In active test plan phases | 701 |
+| | In removed phases (retained, append-only) | 2,315 |
 | | Test-to-spec coverage mappings | 1,988 |
-| | Automated tests passing | 5,962 |
-| **Work Items** | Total | 917 |
-| | Resolved | 854 |
-| | Open | 27 |
-| **Assertions** | Machine-verifiable assertions | 180 |
-| | Currently passing | 127 |
-| | Expected failures (specified, not implemented) | 53 |
-| | Total assertion run records | 19,092 |
+| | Automated tests passing | 6,061 |
+| **Work Items** | Total | 1,026 |
+| | Resolved | 929 |
+| | Open | 97 |
+| **Assertions** | Specs with machine-verifiable assertions | 231 |
+| | Total assertion run records | 40,791 |
+| **Test Plan** | Active phases (live-only, SPEC-1649) | 13 |
+| | Removed phases (mocked/inspection) | 3 |
 | **Knowledge** | Documents under change control | 138 |
 | | Operational procedures | 13 |
-| | Governance principles | 14 |
-| **Database** | Versioned artifact rows | 8,443 |
-| | Database size | 14.6 MB |
+| | Governance principles | 19 (17 numbered + 2 architectural) |
+| **Database** | Versioned artifact rows | 9,126 |
+| | Database size | 29.2 MB |
 | | Data loss incidents | 0 |
 
 ### What the System Catches
@@ -829,6 +866,8 @@ The following failure modes are detected automatically, without human interventi
 - **Accumulated process drift** — every 5th session is an audit, catching errors that compound across sessions
 - **Untested specifications** — `get_untested_specs()` identifies coverage gaps on demand
 - **Premature implementation** — GOV-09 hook detects spec language and enforces spec-first workflow; GOV-12 stage gates prevent implementation without tests
+- **False test confidence** — SPEC-1649 mandates live-only external interface testing; mocked tests that pass locally but miss production bugs are excluded from the test plan
+- **Unauthorized changes** — GOV-15 requires owner approval before fixing failed tests (could be a test bug or product bug); GOV-16 requires owner approval before any deployment
 
 ### What the System Does Not Measure
 
@@ -853,6 +892,6 @@ Honesty about limitations: Membase does not track session duration, so there are
 
 ---
 
-*This pattern was developed across 128 sessions on the Agent Red Customer Experience project by Remaker Digital. The implementation approach is freely reusable under the MIT license. Adapt the schema to your project's needs — the core principles (append-only, machine-verifiable assertions, governance discipline, session handoff, audit cadence) are universal.*
+*This pattern was developed across 133 sessions on the Agent Red Customer Experience project by Remaker Digital. The implementation approach is freely reusable under the MIT license. Adapt the schema to your project's needs — the core principles (append-only, machine-verifiable assertions, live-only test verification, governance discipline, session handoff, audit cadence) are universal.*
 
 *© 2026 Remaker Digital, a DBA of VanDusen & Palmeter, LLC. All rights reserved.*

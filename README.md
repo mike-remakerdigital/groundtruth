@@ -44,6 +44,15 @@ Read MEMBASE-4-CLAUDE.md and set up the Membase knowledge database for this proj
 
 That's it. The file contains the complete implementation pattern — schema, API, assertion runner, session hooks, governance principles, and web UI — with enough detail for Claude to reproduce it and adapt it to your project.
 
+## Commit-Everything Policy
+
+All project files created locally must be committed. Before pushing:
+
+- `git add -A`
+- `git status --short` must be empty
+
+This prevents core artifacts from living only on disk.
+
 ## Quick Start
 
 ```bash

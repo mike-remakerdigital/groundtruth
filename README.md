@@ -12,7 +12,7 @@
 
 Membase is a **pattern** (not a library) for giving Claude Code durable memory that survives across sessions. It replaces fragile markdown backlogs with a structured, append-only SQLite database where every change is versioned and every claim is machine-verifiable.
 
-Developed across 206 sessions on a commercial SaaS project, it solves three problems that emerge in long-running Claude Code projects:
+Developed across 212 sessions on a commercial SaaS project, it solves three problems that emerge in long-running Claude Code projects:
 
 1. **Context window saturation** — long sessions accumulate stale context that biases decisions.
 2. **Session boundary amnesia** — each new session starts cold; CLAUDE.md and MEMORY.md help but drift over time.
@@ -100,7 +100,7 @@ See the [full glossary with examples](MEMBASE-4-CLAUDE.md#glossary) in the imple
 
 ## Benefits & Milestones
 
-Membase was not designed upfront — it evolved through real project needs across 206 sessions. The milestones below trace how each capability was added in response to a specific problem.
+Membase was not designed upfront — it evolved through real project needs across 212 sessions. The milestones below trace how each capability was added in response to a specific problem.
 
 ### Evolution Timeline
 
@@ -144,23 +144,27 @@ Membase was not designed upfront — it evolved through real project needs acros
 | S191–S196 | Hardcoded tier gates; no runtime operational control | **SPA Control Plane** — EntitlementService (data-driven tiers), 39 API endpoints, 9 SPA pages, feature flags, deployment orchestrator |
 | S198–S201 | No systematic quality measurement | **Quality Measurement** — quality score API, Schemathesis fuzzing (307 ops), Hypothesis property-based tests, mutmut mutation testing, coverage enforcement |
 | S202–S206 | 55-spec feature backlog needing multi-phase implementation | **BACKLOG-018 complete** — A/B testing, integration framework (18 specs), MCP agents (7 specs), pipeline observatory, multi-agent coordination via prime-bridge |
+| S207–S208 | Verification runner auth fails intermittently; tests cannot run unattended | **Cloud-native test automation** — Two-container test host pattern (internal ingress), HMAC-SHA256 verification tokens, SPA-triggered test execution with progressive Cosmos results |
+| S209–S210 | Build/deploy requires manual multi-step orchestration | **Single-command pipelines** — build.py (version bump → frontend builds → GitHub Actions → ACR verify), deploy.py (image check → deploy → health wait → version verify), thermal-safe local test runner |
+| S211 | Claude silently weakens tests and removes architectural patterns | **Quality guardrails** — 5 PreToolUse/pre-commit hooks (assertion ratchet, test deletion guard, architecture guard, TSX spec gate, credential scan). Three-layer defense model. |
+| S212 | Production and staging share test infrastructure; uncontrolled regressions | **Environment isolation + production verification** — Separate test hosts per environment, skip-as-pass classification, SPEC-0058 enforcement (24 files cleaned), widget storefront presence testing |
 
 ### Current Database (as of Session 206)
 
 | Metric | Count |
 |--------|-------|
-| Specifications | 2,052 (331 verified, 1,486 implemented, 40 specified, 195 retired) |
-| Test artifacts | 10,847 (linked to specifications) |
-| Work items | ~1,600 (240 open) |
+| Specifications | 2,052 (331 verified, 1,511 implemented, 15 specified, 195 retired) |
+| Test artifacts | 10,912 (linked to specifications) |
+| Work items | ~1,600 (33 open) |
 | Machine-verifiable assertions | ~2,040 specs with assertions (99.5% coverage) |
-| Knowledge documents | 176 |
+| Knowledge documents | 154 |
 | Operational procedures | 14 |
 | Governance principles | 20 (GOV-01 through GOV-18 + 2 architectural) |
-| Test plan phases | 18 active (incl. fuzzing + property phases) |
+| Test plan phases | 18 active (incl. fuzzing + property phases) | |
 | Testable elements | 520 (UI component inventory for coverage tracking) |
 | Live E2E tests | 1,050 (across 3 admin consoles) |
-| Automated tests passing | 6,920 (unit + multi-tenant + chat + integration) |
-| Claude Code skills | 8 (KB-aware, project-specific) |
+| Automated tests passing | 9,152 (12 suite types, full pipeline) |
+| Claude Code skills | 10 (KB-aware, project-specific) |
 | Production tenants | 20 |
 | Agent containers | 7 |
 | SPA Control Plane endpoints | 39 |
@@ -175,10 +179,14 @@ Membase was not designed upfront — it evolved through real project needs acros
 - **Cold-start amnesia** — session handoff prompts give each new session the context it needs without human re-explanation
 - **Accumulated process drift** — every 5th session is an audit, catching errors that compound across sessions
 - **Untested specifications** — `get_untested_specs()` identifies coverage gaps on demand
+- **Credential leaks** — PreToolUse hooks block hardcoded secrets before they reach disk
+- **Test weakening** — assertion count ratchet rejects commits that reduce assertion counts
+- **Architectural erosion** — pre-commit guards verify critical patterns exist when related files change
+- **Untraced frontend changes** — TSX commit gate requires specification IDs on all frontend commits
 
 ## Skills — Executable Governance
 
-Claude Code skills (`.claude/skills/`) encode repeatable workflows as executable playbooks. Skills mechanize governance chains (e.g., GOV-12 + GOV-13) that previously relied on Claude's self-discipline. See **Step 9: Skills Framework** in [`MEMBASE-4-CLAUDE.md`](MEMBASE-4-CLAUDE.md) for the full implementation guide, including skill anatomy, project-specific vs generic skills, template-driven generation, and the 8 reference skills.
+Claude Code skills (`.claude/skills/`) encode repeatable workflows as executable playbooks. Skills mechanize governance chains (e.g., GOV-12 + GOV-13) that previously relied on Claude's self-discipline. See **Step 9: Skills Framework** in [`MEMBASE-4-CLAUDE.md`](MEMBASE-4-CLAUDE.md) for the full implementation guide, including skill anatomy, project-specific vs generic skills, template-driven generation, and the 10 reference skills (including multi-agent coordination and architecture decision records).
 
 ## Why Not Just Use Markdown?
 
@@ -199,10 +207,10 @@ This pattern was developed incrementally on the [Agent Red Customer Experience](
 
 The database is used exclusively by Claude and contains only what Claude needs to remember. The human observes through a lightweight read-only UI (sort, filter, search, tree-view, change history) that deliberately excludes write operations. When the human spots a discrepancy, they tell Claude, and Claude creates a corrected version.
 
-The current database is ~40 MB with 2,052 specifications, 10,847 test artifacts, 1 test plan (18 active phases), ~1,600 work items, 14 operational procedures, 176 documents, 520 testable elements, ~2,040 specs with machine-verifiable assertions (99.5% coverage), 8 KB-aware Claude Code skills, and multi-agent coordination via prime-bridge — all accumulated across 206 sessions with zero data loss.
+The current database is ~40 MB with 2,052 specifications, 10,847 test artifacts, 1 test plan (18 active phases), ~1,600 work items, 14 operational procedures, 176 documents, 520 testable elements, ~2,040 specs with machine-verifiable assertions (99.5% coverage), 8 KB-aware Claude Code skills, and multi-agent coordination via prime-bridge — all accumulated across 212 sessions with zero data loss.
 
 ---
 
-*The implementation approach is freely reusable under the MIT license. Adapt the schema to your project's needs — the core principles (append-only, machine-verifiable assertions, live-only test verification, quality dashboard, governance discipline, session handoff, audit cadence) are universal.*
+*The implementation approach is freely reusable under the MIT license. Adapt the schema to your project's needs — the core principles (append-only, machine-verifiable assertions, live-only test verification, quality dashboard, governance discipline, session handoff, audit cadence, defense-in-depth enforcement, procedure encoding) are universal.*
 
 *© 2026 Remaker Digital, a DBA of VanDusen & Palmeter, LLC. All rights reserved.*

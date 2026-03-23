@@ -2,7 +2,7 @@
 
 **A pattern for giving Claude Code persistent, version-controlled, self-auditing project memory using an append-only SQLite database.**
 
-> This pattern was developed across 206 sessions on a commercial SaaS project (Agent Red Customer Experience). It evolved from markdown-only memory into a structured database with 9 managed artifact types after discovering that markdown backlogs drift, context windows forget, and session boundaries lose state. The approach below is extractable to any project.
+> This pattern was developed across 212 sessions on a commercial SaaS project (Agent Red Customer Experience). It evolved from markdown-only memory into a structured database with 9 managed artifact types after discovering that markdown backlogs drift, context windows forget, and session boundaries lose state. The approach below is extractable to any project.
 
 ---
 
@@ -1105,7 +1105,318 @@ This formalizes what most teams do ad-hoc — assigning parallel work streams to
 
 ---
 
-## Lessons Learned (206 Sessions)
+
+
+## Step 13: Defense-in-Depth Hook Architecture
+
+Steps 4 and 12 describe individual hooks. This step describes the **layered defense model** — three enforcement layers that catch different failure modes at different times, creating redundancy so that no single layer's failure silently degrades quality.
+
+### The Three Layers
+
+```
+Layer 1: Real-time (PreToolUse)      — catches mistakes AS Claude writes
+Layer 2: Commit-time (git pre-commit) — catches mistakes BEFORE they enter history
+Layer 3: Session-time (SessionStart)  — catches drift BETWEEN sessions
+```
+
+Each layer addresses a distinct failure mode:
+
+| Layer | When It Fires | What It Catches | Failure Mode |
+|-------|--------------|----------------|-------------|
+| PreToolUse | Every Write/Edit/Bash call | Credential leaks, destructive commands | Claude writes insecure code or runs dangerous commands |
+| Pre-commit | Every `git commit` | Assertion count regression, test deletion, architecture erosion, untraced frontend changes, hardcoded secrets | Claude commits code that silently degrades quality |
+| SessionStart | Once per session | KB assertion failures, untested specs, GOV-12 drift, quality metric decline | Drift accumulated across sessions |
+
+### Layer 1: Real-Time PreToolUse Hooks
+
+PreToolUse hooks intercept tool calls **before execution**. They are the fastest feedback loop — Claude sees the rejection immediately and adjusts.
+
+**Credential Scanner** (`credential-scan.py`) — intercepts Write and Edit tool calls:
+- Blocks hardcoded Azure FQDNs, Redis/Cosmos/KeyVault connection strings, API keys with known prefixes
+- Enforces SPEC-0058 (no hardcoded environment attributes)
+- Excludes memory files, hook scripts, deployment configs, and `.env` files
+- Fail-open on parse errors (only blocks on positive credential match)
+
+**Destructive Command Gate** (`destructive-gate.py`) — intercepts Bash tool calls:
+- Blocks recursive deletion, force-push, hard reset, DROP TABLE, DELETE without WHERE
+- Blocks `--no-verify` on git commands (prevents hook bypass)
+- Blocks `curl`/`wget` with credential parameters (exfiltration prevention)
+- Allows safe deletions: `__pycache__`, `node_modules`, `.pytest_cache`, `dist/`, `build/`, temp files
+- Fail-closed on exceptions (unknown commands are blocked, not allowed)
+
+**Design principle:** Layer 1 hooks should be **fast** (< 100ms) and **conservative**. A false positive blocks one tool call; a false negative lets a mistake into the codebase. Prefer false positives — Claude will rephrase and retry.
+
+### Layer 2: Commit-Time Git Pre-Commit Hooks
+
+Pre-commit hooks run 5 checks sequentially. If any check fails, the commit is rejected.
+
+**Assertion Count Ratchet** (`check_assertion_ratchet.py`):
+- Maintains a baseline JSON file mapping every test file to its assertion count
+- On commit: if any staged test file has FEWER assertions than baseline, reject
+- If assertion count INCREASED, auto-update baseline and stage the updated JSON
+- Prevents "test simplification" that silently reduces coverage
+- Counted patterns: `assert`, `self.assert*`, `pytest.raises`, `pytest.warns`, `pytest.approx`
+
+**Test File Deletion Guard** (`check_test_deletion.py`):
+- If any `test_*.py` file is deleted in the staged changes, reject
+- Tests can be added or modified but never removed without owner approval
+
+**Architectural Grep Guards** (`check_arch_guards.py`):
+- 6 guards that verify critical architectural patterns exist when related files are staged
+- Example: if `src/agents/` files are staged, verify `SLIMTransport` or `NatsTransport` imports exist
+- Example: if `src/multi_tenant/` files are staged, verify `EntitlementService` class exists
+- Smart triggering: only checks guards whose trigger paths overlap with staged files
+
+**TSX Commit Gate** (`check_tsx_gate.py`):
+- If any `.tsx` file is staged, the commit message MUST contain `SPEC-NNNN`
+- Every frontend change must trace to a specification (GOV-01 enforcement)
+
+**Hardcoded Environment Scanner** (`check_hardcoded_env.py`):
+- Same detection logic as the PreToolUse credential scanner, but operates on staged file content
+- Redundant with Layer 1, deliberately — catches credentials that entered via external tools or manual editing
+
+### Layer 3: Session-Time Hooks
+
+Described in Step 4. The SessionStart hook catches drift that accumulates between sessions — assertions that used to pass but now fail (regressions), work items missing tests (GOV-12 violations), and quality metric decline.
+
+### Layered Defense in Practice
+
+The three layers are deliberately redundant. Consider a scenario where Claude removes an assertion from a test file:
+
+1. **Layer 1 would not catch this** — Write/Edit hooks check for credentials, not assertion counts
+2. **Layer 2 catches it** — the assertion ratchet detects the count decrease and rejects the commit
+3. **Layer 3 would catch it next session** — if Layer 2 were bypassed, the SessionStart assertion runner would detect the spec is no longer verified
+
+This redundancy means no single failure mode goes undetected. The cost is maintenance overhead (5 hook scripts + 5 pre-commit checks + 1 session hook), but the payoff is that quality regressions require bypassing multiple independent enforcement mechanisms.
+
+### Hook Registration
+
+PreToolUse hooks are registered in `.claude/settings.json` (or `settings.local.json`):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [{"type": "command", "command": "python3 .claude/hooks/credential-scan.py"}]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "python3 .claude/hooks/destructive-gate.py"}]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{"type": "command", "command": "python3 .claude/hooks/spec-classifier.py"}]
+      },
+      {
+        "hooks": [{"type": "command", "command": "python3 .claude/hooks/scheduler.py"}]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [{"type": "command", "command": "python3 .claude/hooks/assertion-check.py", "timeout": 15}]
+      }
+    ]
+  }
+}
+```
+
+Pre-commit hooks are a standard bash script in `.git/hooks/pre-commit` that runs the 5 Python checks sequentially.
+
+### Custom Agents as Quality Reviewers
+
+Beyond hooks, Claude Code supports **custom agents** (`.claude/agents/`) that function as specialized reviewers:
+
+| Agent | Model | Purpose |
+|-------|-------|---------|
+| `code-reviewer` | Sonnet | Confidence-filtered code review (only reports >80% confidence findings). Checks correctness, security (OWASP), governance compliance, multi-tenant isolation. |
+| `security-analyzer` | Sonnet | OWASP Top 10 scanner plus project-specific checks: tenant isolation (partition keys, Redis prefixes), widget XSS, webhook HMAC verification, credential handling. |
+
+Agents are invoked on-demand (not automatically), but can be wired into skills or session procedures. They run on a lighter model (Sonnet) to save cost while the primary session uses the most capable model (Opus).
+
+---
+
+## Step 14: Automated Testing Strategy
+
+Step 10 describes the pipeline architecture. This step describes the **testing philosophy** — what kinds of tests exist, how they are generated, what gaps remain, and the tradeoffs involved.
+
+### Testing Taxonomy (12 Suite Types)
+
+The project uses 12 distinct test suite types, organized from fastest/cheapest to slowest/most expensive:
+
+| Suite | Est. Tests | Speed | What It Catches | Generation Method |
+|-------|-----------|-------|----------------|-------------------|
+| **Unit** | 950 | ~2 min | Logic errors, type mismatches, pure function bugs | Claude-generated from specs |
+| **Core** (multi-tenant) | 3,700 | ~5 min | Tenant isolation, API routing, auth, middleware | Claude-generated from specs |
+| **Integration** | 270 | ~3 min | Component interaction, database queries, cache behavior | Claude-generated from specs + WIs |
+| **Agents** | 300 | ~2 min | MCP agent dispatch, tool execution, guardrails | Claude-generated from SPEC-1706..1712 |
+| **Security** | 150 | ~2 min | Auth bypass, injection, tenant leaks, OWASP patterns | Claude-generated from security specs |
+| **Regression** | 47 | ~1 min | Previously-fixed bugs | Auto-created when WI is resolved |
+| **Widget** | 60 | ~1 min | Embed behavior, postMessage, launcher, resize | Claude-generated from widget specs |
+| **Ops** | 80 | ~1 min | Deployment checks, config validation, health probes | Claude-generated from procedures |
+| **E2E Live** | 1,100 | ~15 min | Real deployment: Playwright against staging/production | Claude-generated from user stories |
+| **Load** | variable | ~10 min | Throughput, latency under load, rate limit behavior | Locust scenarios from capacity specs |
+| **Fuzzing** | 307 ops | ~10 min | API contract violations, edge cases, unexpected inputs | Schemathesis auto-generated from OpenAPI |
+| **Property-based** | 46 | ~3 min | Algebraic invariants, roundtrip properties | Hypothesis strategies from data models |
+
+### Test Generation Patterns
+
+Tests are generated through four distinct mechanisms:
+
+**1. Specification-Driven (Primary):** When a spec is created via `/kb-spec`, Claude generates tests that verify the spec's requirements. The GOV-12 chain (WI -> Test -> Phase) ensures every work item has a linked test before implementation begins. This is the dominant generation mode (~85% of tests).
+
+**2. Assertion-Driven:** Machine-verifiable assertions attached to specs (grep/glob patterns) auto-generate verification at session start. These are not pytest tests — they are codebase-state checks that run before any work begins.
+
+**3. Auto-Generated (Fuzzing + Property):** Schemathesis generates test cases from the OpenAPI schema (307 operations across all endpoints). Hypothesis generates property-based tests from data model invariants (e.g., "serialization roundtrips preserve all fields"). These catch edge cases that specification-driven tests miss.
+
+**4. Regression-Driven:** When a bug is found and fixed, a regression test is created as part of the work item resolution. These tests specifically reproduce the original failure condition to prevent recurrence.
+
+### Live-Only Testing Principle (GOV-10)
+
+All tests must exercise **production interfaces** (HTTP endpoints, rendered UI, real databases), never source code inspection. This principle emerged from a concrete failure: mock-based tests passed while the production system failed due to a database migration mismatch.
+
+Implications:
+- Unit tests call API handler functions with real request objects, not by importing internal helpers
+- E2E tests use Playwright against a running server, not by reading TSX files
+- Integration tests hit real Redis/Cosmos instances (or test containers), never mocked stores
+
+The tradeoff: live tests are slower and environment-dependent. The project mitigates this with a **two-container test host pattern** — a dedicated test runner container (`agent-red-test-host`) with internal-only ingress runs tests against the main API container, keeping test infrastructure isolated from production traffic.
+
+### Known Testing Gaps
+
+Honest accounting of what is NOT covered:
+
+| Gap | Why It Exists | Mitigation |
+|-----|--------------|------------|
+| **Visual regression** | No screenshot comparison tool integrated | Manual UI verification during deploy |
+| **Cross-browser** | E2E tests run Chromium only | Widget tested on Chrome; other browsers untested |
+| **Offline/degraded network** | Test host has reliable connectivity | Resilience specs cover Cosmos/Redis failures but not network partitions |
+| **Real payment processing** | Stripe/PayPal adapters are tested with mocks | Integration framework specs cover adapter protocols; live payment testing deferred |
+| **Mobile viewport** | Playwright tests use desktop viewport | Widget is responsive but not systematically tested on mobile dimensions |
+| **Concurrent multi-tenant load** | Load tests target single tenant | Isolation specs verify partition-key separation but not concurrent-access behavior under load |
+
+### Thermal-Safe Local Testing
+
+On Windows 11 with thermal throttling concerns, the local test runner (`run-tests-thermal-safe.ps1`) distributes load across batches with configurable cooling pauses between them. This prevents thermal BSODs that occurred when running 9,000+ tests without throttling.
+
+```
+Batch 1: core-a (2,400 tests, parallel)  -> 30s cooldown
+Batch 2: core-b (680 tests, parallel)    -> 30s cooldown
+Batch 3: agents-chat (600 tests, parallel) -> 30s cooldown
+Batch 4: integrations (400 tests, parallel) -> 30s cooldown
+Batch 5: sequential (120 tests, serial)
+```
+
+### Test Result Flow
+
+Test results flow into the KB through two paths:
+1. **Cloud path:** The test host writes progressive results to Cosmos DB; the SPA admin console displays them with drill-down and performance charts
+2. **Local path:** The thermal-safe runner produces JUnit XML; pipeline scripts parse results and update KB test records
+
+---
+
+## Step 15: Encoding Procedures to Reduce Orchestration Load
+
+This is arguably the most important architectural insight from 212 sessions: **Claude is too error-prone for reliable multi-step orchestration when operating from prose instructions alone.** The solution is to encode repeatable procedures into executable artifacts (skills, hooks, scripts) that Claude follows mechanically rather than reasoning about dynamically.
+
+### The Orchestration Problem
+
+Claude Code operates as an agentic system — it reads instructions, reasons about them, and takes actions. This works well for novel problems but fails predictably for repeatable procedures:
+
+1. **Step omission:** A 7-step procedure executed from memory will skip steps ~15% of the time. The skipped step is often the "boring" one (update the database, push to git, update MEMORY.md) rather than the "interesting" one (write the code).
+
+2. **Order violation:** Steps that must execute in a specific order get reordered when Claude optimizes for perceived efficiency. Example: deploying before running the pre-deploy assertion check.
+
+3. **Drift over sessions:** The same procedure executed in session S50 and S150 will differ because Claude's interpretation of prose instructions shifts with accumulated context. The procedure itself has not changed — Claude's execution of it has.
+
+4. **Partial execution on error:** When step 3 of 7 fails, Claude often skips to a later step rather than stopping and reporting the failure. This creates partially-applied state that is harder to debug than a clean failure.
+
+### The Encoding Principle
+
+**Prompts encode intent. Hooks encode enforcement. Skills encode execution.**
+
+| Mechanism | What It Encodes | When It Runs | Failure Mode |
+|-----------|----------------|-------------|-------------|
+| CLAUDE.md | Rules and principles | Read at session start | Claude "forgets" mid-session |
+| Hooks | Enforcement gates | Automatically on events | Silent unless a violation occurs |
+| Skills | Step-by-step procedures | On invocation (human or auto) | Claude follows steps mechanically |
+| Scripts | Deterministic logic | Called by skills/hooks | Standard software failure (traceable) |
+
+The key insight: **move logic DOWN this stack whenever possible.** A rule in CLAUDE.md is the weakest form of enforcement (relies on Claude reading and remembering). A hook is stronger (fires automatically). A script is strongest (executes deterministically with no AI reasoning involved).
+
+### Practical Examples
+
+**Before encoding (unreliable):**
+CLAUDE.md says: "When creating a work item, also create a linked test and assign it to a PLAN-001 phase."
+
+Claude follows this correctly ~80% of the time. The other 20%, it creates the WI but forgets the test or the phase assignment. GOV-12 violations accumulate silently.
+
+**After encoding (reliable):**
+The `/kb-work-item` skill contains explicit steps:
+```
+Step 1: Query KB for next WI and TEST IDs
+Step 2: Create work item -> db.insert_work_item(...)
+Step 3: Create linked test -> db.insert_test(...)  [MANDATORY — GOV-12]
+Step 4: Assign to PLAN-001 phase [MANDATORY — GOV-13]
+Step 5: Print summary of full chain: WI -> TEST -> Phase
+```
+
+Claude follows these steps mechanically. The skill is the executable form of the governance rule. If Claude still skips a step, the SessionStart hook catches the GOV-12 violation next session.
+
+**Before encoding (unreliable):**
+CLAUDE.md says: "Never commit code with hardcoded credentials."
+
+Claude follows this correctly ~95% of the time. The other 5%, it writes a test file with a staging FQDN in a string literal, reasoning "this is just a test, not a real credential."
+
+**After encoding (reliable):**
+Three enforcement layers:
+1. PreToolUse hook rejects the Write/Edit call immediately
+2. Pre-commit hook scans staged content and rejects the commit
+3. Next session's assertion check flags the SPEC-0058 violation
+
+### The Skill Catalog as Operational Surface
+
+The project's 10 skills define the complete operational surface — every repeatable procedure has a skill:
+
+| Skill | What It Mechanizes | Steps | Orchestration Replaced |
+|-------|-------------------|-------|----------------------|
+| `/deploy` | Build, deploy, verify pipeline | 4 phases, ~20 checks | "Build the image, push it, deploy, check health..." |
+| `/seed-tenant` | 9-phase database provisioning | 9 phases + post-seed | "Create the config, generate keys, seed articles..." |
+| `/kb-session-wrap` | End-of-session procedure | 5 phases | "Update KB, update memory, commit, push, generate handoff..." |
+| `/run-tests` | Test execution with suite selection | 6 modes | "Run the multi-tenant tests, then agents, then..." |
+| `/kb-spec` | Specification creation with validation | 5 checks + creation | "Check for duplicates, validate fields, insert..." |
+| `/kb-work-item` | GOV-12 chain (WI, Test, Phase, Backlog) | 5 steps | "Create work item, then test, then assign phase..." |
+| `/kb-promote` | Assertion-gated status promotion | 4 checks + promotion | "Run assertions, check WIs, verify code exists..." |
+| `/kb-query` | Read-only KB access | Query + format | "Query the specs table where status = ..." |
+| `/kb-adr` | Architecture Decision Record creation | 4 sections | "Document the decision, rationale, consequences..." |
+| `/prime-bridge-sync` | Multi-agent handoff coordination | Claim, execute, resolve | "Check inbox, claim task, do work, send result..." |
+
+### Measuring Encoding Effectiveness
+
+The effectiveness of procedure encoding can be measured by tracking GOV-12 violations over time:
+
+- **Sessions S1-S50 (prose only):** GOV-12 violations detected in ~30% of sessions
+- **Sessions S50-S100 (early skills):** GOV-12 violations detected in ~15% of sessions
+- **Sessions S100-S200 (full encoding + hooks):** GOV-12 violations detected in ~3% of sessions
+
+The remaining 3% represents edge cases where Claude operates outside any skill (novel tasks, debugging, exploration). These are acceptable — the goal is not zero violations, but zero *silent* violations. The SessionStart hook ensures every violation is surfaced.
+
+### When NOT to Encode
+
+Not everything should be a skill or hook:
+
+- **Novel problem-solving** — debugging, architecture decisions, creative implementation. These require reasoning, not procedure-following.
+- **One-time tasks** — migration scripts, data fixes, spike investigations. If it will only run once, the overhead of encoding exceeds the reliability benefit.
+- **Rapidly-evolving workflows** — procedures that change every few sessions. Encode only after the workflow stabilizes (typically after ~5 manual executions).
+
+The rule of thumb: **if Claude has executed the same procedure more than 3 times across different sessions, encode it.** The first execution is discovery, the second is validation, the third is the signal to automate.
+
+
+---
+
+## Lessons Learned (212 Sessions)
 
 1. **The assertion runner is the single most valuable piece.** It turns "Claude remembers" into "Claude proves." Regressions caught at session start save hours of debugging.
 
@@ -1186,6 +1497,18 @@ This formalizes what most teams do ad-hoc — assigning parallel work streams to
 39. **Multi-agent coordination requires message discipline.** When multiple AI agents work on the same project (e.g., Prime Builder + Loyal Opposition), structured message passing with explicit fields (subject, body, priority, tags) prevents findings from being lost in conversation context. The Loyal Opposition must never write code — only file evidence-based reports.
 
 40. **E2E selector failures are symptoms, not root causes.** When UI tests fail because selectors don't match, the fix is updating selectors — but the root cause is usually untracked UI changes. GOV-14 (UI test sync) exists because selector maintenance is inevitable. Budget for it in every session that touches frontend code.
+
+41. **Layered defense catches what single-layer enforcement misses.** PreToolUse hooks catch real-time mistakes, pre-commit hooks catch commit-time mistakes, SessionStart hooks catch inter-session drift. No single layer covers all failure modes. The redundancy is deliberate — when Layer 1 misses a credential in a test file (reasoning "this is just a test"), Layer 2 catches it at commit time. When Layer 2 is bypassed (external editor), Layer 3 catches it next session. The maintenance cost of 3 layers is justified by the elimination of silent quality regression.
+
+42. **Pre-commit assertion ratchets prevent invisible test weakening.** Counting assertions per test file and rejecting commits that reduce any count prevents a subtle failure mode: Claude "simplifying" tests by removing edge-case assertions while keeping the test nominally passing. The ratchet makes assertion removal require explicit owner approval, converting a silent regression into a visible decision.
+
+43. **Procedure encoding reduces orchestration errors by 10x.** Moving from prose instructions in CLAUDE.md to executable skills reduced GOV-12 violations from ~30% to ~3% of sessions. The remaining violations occur during novel work outside any skill. The key insight: Claude is reliable at following explicit steps but unreliable at reconstructing multi-step procedures from principles. Skills are prompt engineering applied to procedures.
+
+44. **Fail-closed vs fail-open is the critical hook design decision.** Credential scanners should fail-open (only block on positive match — a parse error should not prevent all file writes). Destructive command gates should fail-closed (a pattern-matching exception should block the command, not allow it). Getting this wrong either blocks all work (false fail-closed) or allows the exact thing the hook was designed to prevent (false fail-open).
+
+45. **Two-container test architecture isolates test execution from production traffic.** Running tests inside the API container risks resource contention and accidental state mutation. A dedicated test host container with internal-only ingress (no public access) runs tests against the API container via private networking. This keeps test infrastructure completely invisible to customers while sharing the same Azure Container Apps environment for low-latency communication.
+
+46. **Session-scoped browser instances prevent E2E OOM kills.** Running 272 Playwright test classes with per-class browser launches requires ~40 GB (150 MB per Chromium instance). Session-scoping the browser (one Chromium instance shared across all test classes via a conftest.py fixture) reduced memory to ~200 MB. The fix is a single conftest override — the tests themselves need no changes.
 
 ---
 
@@ -1348,9 +1671,18 @@ Honesty about limitations: Membase does not track session duration, so there are
 - [ ] Create a single-entry-point test pipeline script with phase ordering (Step 10)
 - [ ] Automate deployment with build-deploy-verify pattern and GOV-16 gate (Step 11)
 - [ ] Set up multi-agent coordination if using Loyal Opposition or background agents (Step 12)
+- [ ] Create PreToolUse hooks for credential scanning and destructive command blocking (Step 13)
+- [ ] Create git pre-commit hooks: assertion ratchet, test deletion guard, architectural guards, TSX gate, credential scan (Step 13)
+- [ ] Generate assertion baseline JSON for the ratchet hook (Step 13)
+- [ ] Create custom review agents (code-reviewer, security-analyzer) in `.claude/agents/` (Step 13)
+- [ ] Expand test taxonomy beyond unit/integration/e2e: add security, regression, fuzzing, property-based, load suites (Step 14)
+- [ ] Integrate Schemathesis for OpenAPI contract fuzzing and Hypothesis for property-based testing (Step 14)
+- [ ] Document known testing gaps honestly (Step 14)
+- [ ] Identify repeatable procedures (>3 manual executions) and encode them as skills (Step 15)
+- [ ] Move enforcement from CLAUDE.md prose to hooks and pre-commit checks (Step 15)
 
 ---
 
-*This pattern was developed across 206 sessions on the Agent Red Customer Experience project by Remaker Digital. The implementation approach is freely reusable under the MIT license. Adapt the schema to your project's needs — the core principles (append-only, machine-verifiable assertions, live-only test verification, quality dashboard, governance discipline, session handoff, audit cadence, KB-aware skills, test pipeline architecture, deployment automation, multi-agent coordination) are universal.*
+*This pattern was developed across 212 sessions on the Agent Red Customer Experience project by Remaker Digital. The implementation approach is freely reusable under the MIT license. Adapt the schema to your project's needs — the core principles (append-only, machine-verifiable assertions, live-only test verification, quality dashboard, governance discipline, session handoff, audit cadence, KB-aware skills, test pipeline architecture, deployment automation, multi-agent coordination, defense-in-depth enforcement, procedure encoding) are universal.*
 
 *© 2026 Remaker Digital, a DBA of VanDusen & Palmeter, LLC. All rights reserved.*
